@@ -1,9 +1,597 @@
 <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Eink Sync PWA</title>
-    </head>
-    <body>
-        <h1>Hello GitHub Pages</h1>
-    </body>
-    </html>
+<!--
+  E-Ink Display Sync — Progressive Web App
+  ==========================================
+
+  Single-file PWA that pulls this week's Google Calendar events (Mon-Fri) plus
+  a 7-day Open-Meteo weather forecast for Wright-Patterson AFB, formats them
+  into the schedule JSON that Ricky-EInk-Display expects, and pushes the
+  result over BLE in 180-byte chunks with CRC32 verification.
+
+  ─────────────────────────────────────────────────────────────────────────
+  FIRST-TIME SETUP
+  ─────────────────────────────────────────────────────────────────────────
+
+  1. GOOGLE CLOUD CONSOLE — enable the Calendar API and make OAuth creds.
+
+       https://console.cloud.google.com/
+
+     a. Create (or reuse) a project.
+     b. APIs & Services → Library → search "Google Calendar API" → Enable.
+     c. APIs & Services → OAuth consent screen:
+          - User type: External
+          - App name: "E-Ink Sync" (anything)
+          - Scopes: add ".../auth/calendar.readonly"
+          - Test users: add r56sisk@gmail.com
+          - Publish as Testing (no verification needed).
+     d. APIs & Services → Credentials:
+          - CREATE CREDENTIALS → API key. Copy it (you'll paste below).
+          - CREATE CREDENTIALS → OAuth client ID.
+              Application type: Web application
+              Authorized JavaScript origins: add the URL you'll host this
+                PWA at (see step 2 below). e.g.
+                  https://your-github-username.github.io
+              Save. Copy the Client ID (paste below).
+
+  2. HOSTING — GitHub Pages is easiest (free, HTTPS, required for GIS+BLE).
+
+     a. Create a public GitHub repo, push this `pwa/index.html` to it.
+     b. Repo → Settings → Pages → Source = "Deploy from a branch",
+        Branch = main, Folder = /root (or /pwa if you keep it nested).
+     c. Wait ~1 minute. Your URL will be
+          https://<github-username>.github.io/<repo-name>/
+        (append /pwa/ if the file is inside a pwa folder).
+     d. Go back to step 1d and add THIS exact URL to Authorized JavaScript
+        origins. Google will reject the OAuth call if the origin doesn't
+        match byte-for-byte.
+
+  3. iPHONE — install Bluefy (regular Safari does not support Web Bluetooth).
+
+     a. App Store → search "Bluefy - Web BLE Browser" → install.
+     b. Open Bluefy, navigate to your GitHub Pages URL.
+     c. (Optional) Share → Add to Home Screen for a one-tap launch icon.
+
+  4. FIRST RUN
+
+     a. Paste your API Key and OAuth Client ID into the two fields below
+        (they are saved to localStorage so you only do this once).
+     b. Reset the ESP32 so it's inside its 30-second BLE window.
+     c. Tap "Sync Now". Grant Google consent, pick Ricky-EInk-Display from
+        the Bluetooth picker. Watch the log until "Saved to device".
+
+  ─────────────────────────────────────────────────────────────────────────
+-->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="E-Ink Sync">
+  <meta name="theme-color" content="#1a1a1a">
+  <title>E-Ink Sync</title>
+
+  <style>
+    :root {
+      --bg: #111;
+      --panel: #1c1c1e;
+      --fg: #f2f2f7;
+      --muted: #8e8e93;
+      --accent: #0a84ff;
+      --ok: #30d158;
+      --err: #ff453a;
+      --warn: #ffd60a;
+      --border: #38383a;
+      --radius: 12px;
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      background: var(--bg); color: var(--fg);
+      font: 16px -apple-system, BlinkMacSystemFont, "SF Pro Text", sans-serif;
+      min-height: 100vh;
+    }
+    .wrap {
+      max-width: 520px;
+      margin: 0 auto;
+      padding: 20px 16px 80px;
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 600;
+      margin: 8px 0 20px;
+      letter-spacing: -0.2px;
+    }
+    details.setup {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px 14px;
+      margin-bottom: 16px;
+      font-size: 14px;
+    }
+    details.setup summary {
+      cursor: pointer;
+      font-weight: 500;
+      color: var(--accent);
+      outline: none;
+    }
+    details.setup[open] summary { margin-bottom: 8px; }
+    details.setup p, details.setup li { color: var(--muted); line-height: 1.5; }
+    details.setup a { color: var(--accent); }
+    .config {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 14px;
+      margin-bottom: 16px;
+    }
+    .config label {
+      display: block;
+      font-size: 13px;
+      color: var(--muted);
+      margin-bottom: 4px;
+      font-weight: 500;
+    }
+    .config input {
+      width: 100%;
+      background: #000;
+      color: var(--fg);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px 12px;
+      font: inherit;
+      font-size: 14px;
+      margin-bottom: 12px;
+    }
+    .config input:last-of-type { margin-bottom: 0; }
+    button.primary {
+      width: 100%;
+      background: var(--accent);
+      color: white;
+      border: none;
+      border-radius: var(--radius);
+      padding: 16px;
+      font: inherit;
+      font-size: 17px;
+      font-weight: 600;
+      cursor: pointer;
+      margin-bottom: 16px;
+      -webkit-tap-highlight-color: transparent;
+    }
+    button.primary:disabled { background: #3a3a3c; color: var(--muted); }
+    button.primary:active:not(:disabled) { opacity: 0.8; }
+    .log {
+      background: #000;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px;
+      font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--muted);
+      min-height: 120px;
+      max-height: 280px;
+      overflow-y: auto;
+      white-space: pre-wrap;
+      word-break: break-word;
+      margin-bottom: 16px;
+    }
+    .log .ok   { color: var(--ok); }
+    .log .err  { color: var(--err); }
+    .log .warn { color: var(--warn); }
+    .log .note { color: var(--accent); }
+    pre.preview {
+      background: #000;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 12px;
+      font: 11px/1.4 ui-monospace, SFMono-Regular, Menlo, monospace;
+      color: var(--muted);
+      max-height: 240px;
+      overflow: auto;
+      white-space: pre;
+      margin: 0;
+    }
+    pre.preview:empty { display: none; }
+    .muted { color: var(--muted); font-size: 12px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>E-Ink Display Sync</h1>
+
+    <details class="setup">
+      <summary>First-time setup</summary>
+      <ol>
+        <li>In <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a>: enable the Calendar API, create an API key + an OAuth Client ID (type "Web application"), add this page's URL to the client's Authorized JavaScript origins.</li>
+        <li>Paste both values below. They persist in your browser — one-time setup.</li>
+        <li>Reset the ESP32 so it's inside its 30s BLE window, then tap Sync Now.</li>
+      </ol>
+      <p class="muted">If Google says "origin mismatch", the URL in the browser must exactly match an entry under Authorized JavaScript origins (no trailing slash, matching http/https).</p>
+    </details>
+
+    <div class="config">
+      <label for="apiKey">Google API Key</label>
+      <input id="apiKey" type="text" autocomplete="off" spellcheck="false" placeholder="AIza...">
+
+      <label for="clientId">OAuth Client ID</label>
+      <input id="clientId" type="text" autocomplete="off" spellcheck="false" placeholder="123...apps.googleusercontent.com">
+
+      <label for="calendarId">Calendar ID</label>
+      <input id="calendarId" type="text" autocomplete="off" spellcheck="false" value="r56sisk@gmail.com">
+    </div>
+
+    <button id="syncBtn" class="primary">Sync Now</button>
+
+    <div id="status" class="log">Ready.</div>
+    <pre id="preview" class="preview"></pre>
+  </div>
+
+  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script>
+  "use strict";
+
+  // ─── Config persisted in localStorage ──────────────────────────────────
+  const CFG_KEYS = ["apiKey", "clientId", "calendarId"];
+  for (const k of CFG_KEYS) {
+    const saved = localStorage.getItem(k);
+    if (saved) document.getElementById(k).value = saved;
+  }
+
+  // ─── Constants matching the ESP32 ──────────────────────────────────────
+  const BLE_SVC  = "e131fa2e-f7e5-4f4f-a3e3-c9a2a9d6b4e1";
+  const BLE_DATA = "e131fa2e-f7e5-4f4f-a3e3-c9a2a9d6b4e2";
+  const BLE_CTRL = "e131fa2e-f7e5-4f4f-a3e3-c9a2a9d6b4e3";
+  const BLE_STAT = "e131fa2e-f7e5-4f4f-a3e3-c9a2a9d6b4e4";
+  const DEVICE_NAME = "Ricky-EInk-Display";
+  // 180-byte chunks — well under the default iOS MTU and still plenty fast.
+  const CHUNK_SIZE = 180;
+
+  // Wright-Patterson AFB
+  const LAT = 39.8264;
+  const LON = -84.0486;
+
+  // ─── Logging helpers ───────────────────────────────────────────────────
+  const statusEl  = document.getElementById("status");
+  const previewEl = document.getElementById("preview");
+  function log(msg, cls = "")   {
+    const line = document.createElement("div");
+    if (cls) line.className = cls;
+    line.textContent = msg;
+    statusEl.appendChild(line);
+    statusEl.scrollTop = statusEl.scrollHeight;
+  }
+  const ok   = m => log(m, "ok");
+  const err  = m => log(m, "err");
+  const warn = m => log(m, "warn");
+  const note = m => log(m, "note");
+  function clearLog() { statusEl.textContent = ""; previewEl.textContent = ""; }
+
+  // ─── OAuth (Google Identity Services token client) ─────────────────────
+  function getAccessToken(clientId) {
+    return new Promise((resolve, reject) => {
+      if (!window.google || !google.accounts || !google.accounts.oauth2) {
+        return reject(new Error("Google Identity Services not loaded yet — wait a moment and retry."));
+      }
+      const client = google.accounts.oauth2.initTokenClient({
+        client_id: clientId,
+        scope: "https://www.googleapis.com/auth/calendar.readonly",
+        callback: (resp) => {
+          if (resp && resp.access_token) resolve(resp.access_token);
+          else reject(new Error("OAuth did not return an access token"));
+        },
+        error_callback: (e) => reject(new Error("OAuth error: " + (e && e.type || "unknown"))),
+      });
+      client.requestAccessToken({ prompt: "" });
+    });
+  }
+
+  // ─── Date helpers ──────────────────────────────────────────────────────
+  function getMondayOfWeek(now) {
+    const d = new Date(now);
+    const dow = d.getDay();            // 0=Sun..6=Sat
+    const delta = dow === 0 ? 1 : 1 - dow; // Sunday → next Mon, else back to Mon
+    d.setDate(d.getDate() + delta);
+    d.setHours(0, 0, 0, 0);
+    return d;
+  }
+  function isoDay(d) {
+    // YYYY-MM-DD in local time (Open-Meteo gives local-timezone dates, not UTC)
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, "0");
+    const day = String(d.getDate()).padStart(2, "0");
+    return `${y}-${m}-${day}`;
+  }
+  function sameLocalDay(a, b) {
+    return a.getFullYear() === b.getFullYear()
+        && a.getMonth()    === b.getMonth()
+        && a.getDate()     === b.getDate();
+  }
+  function formatTime(date) {
+    let h = date.getHours();
+    const m = String(date.getMinutes()).padStart(2, "0");
+    const period = h >= 12 ? "PM" : "AM";
+    h = h % 12 || 12;
+    return `${h}:${m} ${period}`;
+  }
+  function formatRange(start, end) {
+    const s = formatTime(start), e = formatTime(end);
+    const sP = s.slice(-2), eP = e.slice(-2);
+    if (sP === eP) return `${s.slice(0, -3)}-${e}`;
+    return `${s}-${e}`;
+  }
+
+  // ─── Event title cleanup ───────────────────────────────────────────────
+  function cleanTitle(raw) {
+    let t = String(raw || "");
+    t = t.replace(/\s*\([^)]*\)/g, "");      // anything in parens
+    t = t.replace(/\b[A-Z]\d{2,}[A-Z]?\b/g, ""); // location codes like E300N, B115
+    t = t.replace(/\bRoom\s*#?\s*\d+\b/gi, "");  // "Room 405" / "Room #405"
+    t = t.replace(/\b\d+v\d+\b/g, "");        // "2v2" style ratios
+    t = t.replace(/\b\d+\s*:\s*\d+\b/g, "");  // "1:1" style ratios
+    t = t.replace(/\s{2,}/g, " ").trim();
+    return t || "(untitled)";
+  }
+
+  // ─── WMO weather code → {condition, label} ─────────────────────────────
+  const WMO = new Map([
+    [0,  { condition: "sunny",         label: "Sunny" }],
+    [1,  { condition: "partly_cloudy", label: "Mostly Clear" }],
+    [2,  { condition: "partly_cloudy", label: "Partly Cloudy" }],
+    [3,  { condition: "cloudy",        label: "Cloudy" }],
+    [45, { condition: "fog",           label: "Fog" }],
+    [48, { condition: "fog",           label: "Fog" }],
+    [51, { condition: "rain",          label: "Drizzle" }],
+    [53, { condition: "rain",          label: "Drizzle" }],
+    [55, { condition: "rain",          label: "Drizzle" }],
+    [56, { condition: "rain",          label: "Frz Drizzle" }],
+    [57, { condition: "rain",          label: "Frz Drizzle" }],
+    [61, { condition: "rain",          label: "Rain" }],
+    [63, { condition: "rain",          label: "Rain" }],
+    [65, { condition: "rain",          label: "Heavy Rain" }],
+    [66, { condition: "rain",          label: "Frz Rain" }],
+    [67, { condition: "rain",          label: "Frz Rain" }],
+    [71, { condition: "snow",          label: "Snow" }],
+    [73, { condition: "snow",          label: "Snow" }],
+    [75, { condition: "snow",          label: "Heavy Snow" }],
+    [77, { condition: "snow",          label: "Snow" }],
+    [80, { condition: "rain",          label: "Showers" }],
+    [81, { condition: "rain",          label: "Showers" }],
+    [82, { condition: "rain",          label: "Heavy Showers" }],
+    [85, { condition: "snow",          label: "Snow Showers" }],
+    [86, { condition: "snow",          label: "Snow Showers" }],
+    [95, { condition: "storm",         label: "Thunderstorm" }],
+    [96, { condition: "storm",         label: "Thunderstorm" }],
+    [99, { condition: "storm",         label: "Thunderstorm" }],
+  ]);
+  function wmoToWeather(code) {
+    return WMO.get(code) || { condition: "cloudy", label: "Unknown" };
+  }
+
+  // ─── API fetches ───────────────────────────────────────────────────────
+  async function fetchCalendarEvents(token, calendarId, timeMin, timeMax) {
+    const url = new URL(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(calendarId)}/events`);
+    url.searchParams.set("timeMin", timeMin.toISOString());
+    url.searchParams.set("timeMax", timeMax.toISOString());
+    url.searchParams.set("singleEvents", "true");
+    url.searchParams.set("orderBy", "startTime");
+    url.searchParams.set("maxResults", "250");
+    const r = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+    if (!r.ok) throw new Error(`Calendar API ${r.status}: ${await r.text()}`);
+    const body = await r.json();
+    return body.items || [];
+  }
+
+  async function fetchWeather() {
+    const url = new URL("https://api.open-meteo.com/v1/forecast");
+    url.searchParams.set("latitude", LAT);
+    url.searchParams.set("longitude", LON);
+    url.searchParams.set("daily", "weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max");
+    url.searchParams.set("temperature_unit", "fahrenheit");
+    url.searchParams.set("timezone", "America/New_York");
+    url.searchParams.set("forecast_days", "8");
+    const r = await fetch(url);
+    if (!r.ok) throw new Error(`Open-Meteo ${r.status}`);
+    const body = await r.json();
+    const daily = body.daily || {};
+    const out = new Map();
+    const dates  = daily.time || [];
+    for (let i = 0; i < dates.length; i++) {
+      out.set(dates[i], {
+        high:    Math.round(daily.temperature_2m_max[i]),
+        low:     Math.round(daily.temperature_2m_min[i]),
+        precip:  Math.round(daily.precipitation_probability_max[i] || 0),
+        wmo:     daily.weathercode[i],
+      });
+    }
+    return out;
+  }
+
+  // ─── Build final schedule JSON ─────────────────────────────────────────
+  function buildPayload(events, weatherByDate) {
+    const monday = getMondayOfWeek(new Date());
+    const dayNames = ["MON", "TUE", "WED", "THU", "FRI"];
+    const seen = new Set();
+    const days = [];
+    for (let i = 0; i < 5; i++) {
+      const d = new Date(monday);
+      d.setDate(monday.getDate() + i);
+
+      // Events on this local day
+      const dayEvents = [];
+      for (const e of events) {
+        const startStr = e.start && (e.start.dateTime || e.start.date);
+        const endStr   = e.end   && (e.end.dateTime   || e.end.date);
+        if (!startStr) continue;
+        if (!e.start.dateTime) continue; // skip all-day events
+        const start = new Date(startStr);
+        if (!sameLocalDay(start, d)) continue;
+        const key = e.iCalUID || e.id;
+        if (key && seen.has(key)) continue;
+        if (key) seen.add(key);
+        const end = endStr ? new Date(endStr) : new Date(start.getTime() + 30 * 60 * 1000);
+        dayEvents.push({
+          title: cleanTitle(e.summary),
+          time:  formatRange(start, end),
+        });
+      }
+      dayEvents.sort((a, b) => a.time.localeCompare(b.time));
+
+      // Weather for this day
+      const key = isoDay(d);
+      const w   = weatherByDate.get(key) || { high: 0, low: 0, precip: 0, wmo: 3 };
+      const wm  = wmoToWeather(w.wmo);
+
+      days.push({
+        name: dayNames[i],
+        date: d.getDate(),
+        weather: {
+          condition: wm.condition,
+          label:     wm.label,
+          high:      w.high,
+          low:       w.low,
+          precip:    w.precip,
+        },
+        events: dayEvents,
+      });
+    }
+    return { days };
+  }
+
+  // ─── CRC32 (IEEE 802.3, matches firmware crc32_ieee) ───────────────────
+  const CRC_TABLE = (() => {
+    const t = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let k = 0; k < 8; k++) {
+        c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      }
+      t[i] = c >>> 0;
+    }
+    return t;
+  })();
+  function crc32(bytes) {
+    let c = 0xFFFFFFFF;
+    for (let i = 0; i < bytes.length; i++) {
+      c = CRC_TABLE[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+    }
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  // ─── BLE send ──────────────────────────────────────────────────────────
+  async function sendViaBLE(jsonStr) {
+    const bytes = new TextEncoder().encode(jsonStr);
+    const crc   = crc32(bytes);
+    const crcHex = crc.toString(16).toUpperCase().padStart(8, "0");
+    note(`Payload: ${bytes.length} bytes, CRC=0x${crcHex}`);
+
+    log("Requesting BLE device…");
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{ name: DEVICE_NAME }],
+      optionalServices: [BLE_SVC],
+    });
+    log(`Connecting to ${device.name}…`);
+    const server  = await device.gatt.connect();
+    const service = await server.getPrimaryService(BLE_SVC);
+    const dataChr = await service.getCharacteristic(BLE_DATA);
+    const ctrlChr = await service.getCharacteristic(BLE_CTRL);
+    const statChr = await service.getCharacteristic(BLE_STAT);
+
+    // Listen for status notifications
+    const statusEvents = [];
+    const statusPromise = (expected) => new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`Timeout waiting for ${expected}`)), 15000);
+      const handler = (ev) => {
+        const v = new TextDecoder().decode(ev.target.value);
+        statusEvents.push(v);
+        log(`← ${v}`);
+        if (v.startsWith("ERR")) {
+          clearTimeout(timer);
+          statChr.removeEventListener("characteristicvaluechanged", handler);
+          reject(new Error(v));
+        } else if (v === expected) {
+          clearTimeout(timer);
+          statChr.removeEventListener("characteristicvaluechanged", handler);
+          resolve(v);
+        }
+      };
+      statChr.addEventListener("characteristicvaluechanged", handler);
+    });
+    await statChr.startNotifications();
+
+    // 1) START
+    const startCmd = `START:${bytes.length}:${crcHex}`;
+    log(`→ ${startCmd}`);
+    await ctrlChr.writeValue(new TextEncoder().encode(startCmd));
+    await statusPromise("OK:READY");
+
+    // 2) Chunks
+    const total = Math.ceil(bytes.length / CHUNK_SIZE);
+    for (let i = 0, chunkIdx = 0; i < bytes.length; i += CHUNK_SIZE, chunkIdx++) {
+      const slice = bytes.slice(i, i + CHUNK_SIZE);
+      await dataChr.writeValue(slice);
+      if ((chunkIdx % 5) === 0 || chunkIdx === total - 1) {
+        log(`  chunk ${chunkIdx + 1}/${total}`);
+      }
+    }
+
+    // 3) END
+    log("→ END");
+    await ctrlChr.writeValue(new TextEncoder().encode("END"));
+    await statusPromise("OK:SAVED");
+
+    if (device.gatt.connected) device.gatt.disconnect();
+  }
+
+  // ─── Top-level sync button ─────────────────────────────────────────────
+  document.getElementById("syncBtn").addEventListener("click", async () => {
+    const btn = document.getElementById("syncBtn");
+    btn.disabled = true;
+    clearLog();
+    try {
+      const cfg = {};
+      for (const k of CFG_KEYS) {
+        cfg[k] = document.getElementById(k).value.trim();
+        localStorage.setItem(k, cfg[k]);
+      }
+      if (!cfg.apiKey)    throw new Error("Google API Key is required");
+      if (!cfg.clientId)  throw new Error("OAuth Client ID is required");
+      if (!cfg.calendarId) throw new Error("Calendar ID is required");
+
+      if (!navigator.bluetooth) {
+        throw new Error("Web Bluetooth not available — use Bluefy on iPhone (Safari doesn't support it).");
+      }
+
+      // Time window: this week's Mon 00:00 → Fri 23:59:59 local
+      const monday = getMondayOfWeek(new Date());
+      const friEnd = new Date(monday);
+      friEnd.setDate(monday.getDate() + 5); // Saturday 00:00
+      note(`Week: ${monday.toDateString()} → ${new Date(friEnd - 1).toDateString()}`);
+
+      log("Requesting Google access token…");
+      const token = await getAccessToken(cfg.clientId);
+      ok("Token acquired");
+
+      log("Fetching calendar events…");
+      const events = await fetchCalendarEvents(token, cfg.calendarId, monday, friEnd);
+      ok(`Got ${events.length} event(s)`);
+
+      log("Fetching weather…");
+      const weather = await fetchWeather();
+      ok(`Got ${weather.size} forecast day(s)`);
+
+      const payload = buildPayload(events, weather);
+      const json = JSON.stringify(payload);
+      previewEl.textContent = JSON.stringify(payload, null, 2);
+      note(`Built payload — ${payload.days.reduce((n, d) => n + d.events.length, 0)} event(s) this week`);
+
+      await sendViaBLE(json);
+      ok("✓ Saved to device");
+    } catch (e) {
+      err("✗ " + (e && e.message || e));
+      console.error(e);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+  </script>
+</body>
+</html>
