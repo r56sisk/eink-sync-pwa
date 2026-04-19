@@ -219,13 +219,18 @@
       <input id="calendarId" type="text" autocomplete="off" spellcheck="false" value="r56sisk@gmail.com">
     </div>
 
-    <button id="syncBtn" class="primary">Sync Now</button>
+    <button id="syncBtn" class="primary" disabled>Loading Google services…</button>
 
     <div id="status" class="log">Ready.</div>
     <pre id="preview" class="preview"></pre>
   </div>
 
-  <script src="https://accounts.google.com/gsi/client" async defer></script>
+  <script
+    id="gisScript"
+    src="https://accounts.google.com/gsi/client"
+    onload="window.__gisLoadEvent = true"
+    onerror="window.__gisErrorEvent = true"
+  ></script>
   <script>
   "use strict";
 
@@ -265,11 +270,85 @@
   const note = m => log(m, "note");
   function clearLog() { statusEl.textContent = ""; previewEl.textContent = ""; }
 
+  // ─── GIS loader with retry ─────────────────────────────────────────────
+  // Bluefy (WKWebView) sometimes loads external scripts slowly or blocks them.
+  // We poll for `window.google.accounts.oauth2` up to ~20s and show a clear
+  // error (with retry) if it never arrives.
+  const GIS_URL = "https://accounts.google.com/gsi/client";
+  let gisReady = false;
+
+  function gisIsReady() {
+    return !!(window.google && google.accounts && google.accounts.oauth2);
+  }
+
+  async function waitForGIS({ timeoutMs = 20000, pollMs = 200 } = {}) {
+    const start = Date.now();
+    while (!gisIsReady()) {
+      if (window.__gisErrorEvent) {
+        throw new Error("Google Identity Services script failed to load (network / CSP / browser block).");
+      }
+      if (Date.now() - start > timeoutMs) {
+        throw new Error(`Google Identity Services did not initialize within ${timeoutMs / 1000}s.`);
+      }
+      await new Promise(r => setTimeout(r, pollMs));
+    }
+    return true;
+  }
+
+  async function reloadGIS() {
+    // Remove existing script, drop any cached state, re-inject.
+    const old = document.getElementById("gisScript");
+    if (old) old.remove();
+    window.__gisLoadEvent = false;
+    window.__gisErrorEvent = false;
+    if (window.google && window.google.accounts) delete window.google.accounts;
+    const s = document.createElement("script");
+    s.id = "gisScript";
+    s.src = GIS_URL + "?retry=" + Date.now(); // cache-bust
+    s.onload  = () => { window.__gisLoadEvent = true; };
+    s.onerror = () => { window.__gisErrorEvent = true; };
+    document.body.appendChild(s);
+  }
+
+  async function initGIS() {
+    const btn = document.getElementById("syncBtn");
+    log("Loading Google Identity Services…", "note");
+
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      try {
+        if (attempt > 1) {
+          warn(`Retrying GIS load (attempt ${attempt}/3)…`);
+          await reloadGIS();
+        }
+        await waitForGIS();
+        gisReady = true;
+        ok(`Google Identity Services ready${attempt > 1 ? ` (attempt ${attempt})` : ""}.`);
+        btn.disabled = false;
+        btn.textContent = "Sync Now";
+        return;
+      } catch (e) {
+        err(`Attempt ${attempt}: ${e.message}`);
+      }
+    }
+    // All attempts failed — offer a manual retry button
+    err("Google Identity Services could not load. Tap below to try again.");
+    btn.disabled = false;
+    btn.textContent = "Retry loading Google services";
+    btn.dataset.mode = "retry";
+  }
+
+  // Kick it off as soon as the page is interactive
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", initGIS);
+  } else {
+    initGIS();
+  }
+
   // ─── OAuth (Google Identity Services token client) ─────────────────────
   function getAccessToken(clientId) {
     return new Promise((resolve, reject) => {
-      if (!window.google || !google.accounts || !google.accounts.oauth2) {
-        return reject(new Error("Google Identity Services not loaded yet — wait a moment and retry."));
+      if (!gisIsReady()) {
+        return reject(new Error("Google Identity Services not ready — tap 'Retry loading Google services' first."));
       }
       const client = google.accounts.oauth2.initTokenClient({
         client_id: clientId,
@@ -544,6 +623,18 @@
   // ─── Top-level sync button ─────────────────────────────────────────────
   document.getElementById("syncBtn").addEventListener("click", async () => {
     const btn = document.getElementById("syncBtn");
+
+    // If we're in retry mode after a failed GIS load, re-run the loader
+    // instead of trying to sync.
+    if (btn.dataset.mode === "retry") {
+      btn.dataset.mode = "";
+      btn.disabled = true;
+      btn.textContent = "Loading Google services…";
+      clearLog();
+      await initGIS();
+      return;
+    }
+
     btn.disabled = true;
     clearLog();
     try {
