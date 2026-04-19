@@ -28,9 +28,13 @@
           - CREATE CREDENTIALS → API key. Copy it (you'll paste below).
           - CREATE CREDENTIALS → OAuth client ID.
               Application type: Web application
-              Authorized JavaScript origins: add the URL you'll host this
-                PWA at (see step 2 below). e.g.
+              Authorized JavaScript origins: add your hosting ORIGIN. e.g.
                   https://your-github-username.github.io
+              Authorized redirect URIs: add the EXACT page URL (same one
+                you'll open in Bluefy). e.g.
+                  https://your-github-username.github.io/your-repo/pwa/
+              IMPORTANT: the redirect URI must match character-for-character
+              (trailing slash matters). Google will reject any drift.
               Save. Copy the Client ID (paste below).
 
   2. HOSTING — GitHub Pages is easiest (free, HTTPS, required for GIS+BLE).
@@ -201,11 +205,16 @@
     <details class="setup">
       <summary>First-time setup</summary>
       <ol>
-        <li>In <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a>: enable the Calendar API, create an API key + an OAuth Client ID (type "Web application"), add this page's URL to the client's Authorized JavaScript origins.</li>
-        <li>Paste both values below. They persist in your browser — one-time setup.</li>
-        <li>Reset the ESP32 so it's inside its 30s BLE window, then tap Sync Now.</li>
+        <li>In <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a>: enable the Calendar API, then create an API key and an OAuth Client ID of type "Web application".</li>
+        <li>On that OAuth client, add:
+          <br><b>Authorized JavaScript origins:</b> your hosting origin, e.g. <code>https://you.github.io</code>
+          <br><b>Authorized redirect URIs:</b> the exact page URL, e.g. <code>https://you.github.io/repo/pwa/</code>
+          (trailing slash matters).
+        </li>
+        <li>Paste the API key + Client ID below. They persist in your browser — one-time setup.</li>
+        <li>Reset the ESP32 so it's inside its 30s BLE window, then tap Sync Now. Google will redirect you for consent on first run; the token is cached for ~1 hour so subsequent syncs skip the redirect.</li>
       </ol>
-      <p class="muted">If Google says "origin mismatch", the URL in the browser must exactly match an entry under Authorized JavaScript origins (no trailing slash, matching http/https).</p>
+      <p class="muted">If Google says "redirect_uri_mismatch", the URL in your browser's address bar must match a value in Authorized redirect URIs exactly (protocol, host, path, and any trailing slash).</p>
     </details>
 
     <div class="config">
@@ -219,18 +228,11 @@
       <input id="calendarId" type="text" autocomplete="off" spellcheck="false" value="r56sisk@gmail.com">
     </div>
 
-    <button id="syncBtn" class="primary" disabled>Loading Google services…</button>
+    <button id="syncBtn" class="primary">Sync Now</button>
 
     <div id="status" class="log">Ready.</div>
     <pre id="preview" class="preview"></pre>
   </div>
-
-  <script
-    id="gisScript"
-    src="https://accounts.google.com/gsi/client"
-    onload="window.__gisLoadEvent = true"
-    onerror="window.__gisErrorEvent = true"
-  ></script>
   <script>
   "use strict";
 
@@ -270,97 +272,122 @@
   const note = m => log(m, "note");
   function clearLog() { statusEl.textContent = ""; previewEl.textContent = ""; }
 
-  // ─── GIS loader with retry ─────────────────────────────────────────────
-  // Bluefy (WKWebView) sometimes loads external scripts slowly or blocks them.
-  // We poll for `window.google.accounts.oauth2` up to ~20s and show a clear
-  // error (with retry) if it never arrives.
-  const GIS_URL = "https://accounts.google.com/gsi/client";
-  let gisReady = false;
+  // ─── OAuth 2.0 implicit flow (redirect, no JS library) ─────────────────
+  // Bluefy (and many WKWebView-based iOS browsers) block Google Identity
+  // Services. We use the pure-HTTPS redirect-based implicit flow instead —
+  // no external JS, works everywhere.
+  //
+  //   1. Tap Sync Now  → we mark pendingSync=1 and redirect to Google's auth URL
+  //   2. User consents → Google redirects back to this page with
+  //                      #access_token=…&expires_in=3600… in the URL fragment
+  //   3. On page load we parse the fragment, stash the token, and if
+  //      pendingSync was set, auto-resume the sync.
+  //   4. Tokens last ~1 hour; we cache them in localStorage and skip the
+  //      redirect as long as the cached one is still valid.
+  const OAUTH_SCOPE    = "https://www.googleapis.com/auth/calendar.readonly";
+  const TOKEN_KEY      = "gCalToken";     // { access_token, expires_at }
+  const PENDING_KEY    = "pendingSync";   // "1" if a sync is in progress across the redirect
 
-  function gisIsReady() {
-    return !!(window.google && google.accounts && google.accounts.oauth2);
+  function getRedirectUri() {
+    // MUST match a value under "Authorized redirect URIs" in your OAuth client.
+    // Strips hash + query so copy-paste is deterministic.
+    return window.location.origin + window.location.pathname;
   }
 
-  async function waitForGIS({ timeoutMs = 20000, pollMs = 200 } = {}) {
-    const start = Date.now();
-    while (!gisIsReady()) {
-      if (window.__gisErrorEvent) {
-        throw new Error("Google Identity Services script failed to load (network / CSP / browser block).");
-      }
-      if (Date.now() - start > timeoutMs) {
-        throw new Error(`Google Identity Services did not initialize within ${timeoutMs / 1000}s.`);
-      }
-      await new Promise(r => setTimeout(r, pollMs));
-    }
-    return true;
-  }
-
-  async function reloadGIS() {
-    // Remove existing script, drop any cached state, re-inject.
-    const old = document.getElementById("gisScript");
-    if (old) old.remove();
-    window.__gisLoadEvent = false;
-    window.__gisErrorEvent = false;
-    if (window.google && window.google.accounts) delete window.google.accounts;
-    const s = document.createElement("script");
-    s.id = "gisScript";
-    s.src = GIS_URL + "?retry=" + Date.now(); // cache-bust
-    s.onload  = () => { window.__gisLoadEvent = true; };
-    s.onerror = () => { window.__gisErrorEvent = true; };
-    document.body.appendChild(s);
-  }
-
-  async function initGIS() {
-    const btn = document.getElementById("syncBtn");
-    log("Loading Google Identity Services…", "note");
-
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      try {
-        if (attempt > 1) {
-          warn(`Retrying GIS load (attempt ${attempt}/3)…`);
-          await reloadGIS();
-        }
-        await waitForGIS();
-        gisReady = true;
-        ok(`Google Identity Services ready${attempt > 1 ? ` (attempt ${attempt})` : ""}.`);
-        btn.disabled = false;
-        btn.textContent = "Sync Now";
-        return;
-      } catch (e) {
-        err(`Attempt ${attempt}: ${e.message}`);
-      }
-    }
-    // All attempts failed — offer a manual retry button
-    err("Google Identity Services could not load. Tap below to try again.");
-    btn.disabled = false;
-    btn.textContent = "Retry loading Google services";
-    btn.dataset.mode = "retry";
-  }
-
-  // Kick it off as soon as the page is interactive
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", initGIS);
-  } else {
-    initGIS();
-  }
-
-  // ─── OAuth (Google Identity Services token client) ─────────────────────
-  function getAccessToken(clientId) {
-    return new Promise((resolve, reject) => {
-      if (!gisIsReady()) {
-        return reject(new Error("Google Identity Services not ready — tap 'Retry loading Google services' first."));
-      }
-      const client = google.accounts.oauth2.initTokenClient({
-        client_id: clientId,
-        scope: "https://www.googleapis.com/auth/calendar.readonly",
-        callback: (resp) => {
-          if (resp && resp.access_token) resolve(resp.access_token);
-          else reject(new Error("OAuth did not return an access token"));
-        },
-        error_callback: (e) => reject(new Error("OAuth error: " + (e && e.type || "unknown"))),
-      });
-      client.requestAccessToken({ prompt: "" });
+  function buildAuthUrl(clientId) {
+    const params = new URLSearchParams({
+      client_id:     clientId,
+      redirect_uri:  getRedirectUri(),
+      response_type: "token",
+      scope:         OAUTH_SCOPE,
+      include_granted_scopes: "true",
+      prompt:        "consent", // first time → consent; cached grants re-consent silently
+      state:         "sync",
     });
+    return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+  }
+
+  function parseHashToken() {
+    if (!window.location.hash || window.location.hash.length < 2) return null;
+    const params = new URLSearchParams(window.location.hash.slice(1));
+    const access_token = params.get("access_token");
+    if (!access_token) {
+      const error = params.get("error");
+      if (error) throw new Error(`OAuth error: ${error}`);
+      return null;
+    }
+    const expires_in = parseInt(params.get("expires_in") || "3600", 10);
+    return {
+      access_token,
+      expires_at: Date.now() + expires_in * 1000,
+    };
+  }
+
+  function getCachedToken() {
+    const raw = localStorage.getItem(TOKEN_KEY);
+    if (!raw) return null;
+    try {
+      const t = JSON.parse(raw);
+      // 60s safety margin so the fetch doesn't race the expiry.
+      if (t.access_token && t.expires_at && Date.now() < t.expires_at - 60000) {
+        return t.access_token;
+      }
+    } catch {}
+    localStorage.removeItem(TOKEN_KEY);
+    return null;
+  }
+
+  function setCachedToken(t) {
+    localStorage.setItem(TOKEN_KEY, JSON.stringify(t));
+  }
+
+  function clearCachedToken() {
+    localStorage.removeItem(TOKEN_KEY);
+  }
+
+  function clearUrlHash() {
+    history.replaceState(null, "", window.location.pathname + window.location.search);
+  }
+
+  // Redirects to Google's auth URL. Stashes pendingSync so we know to resume
+  // on return. Saves config fields first so they're populated after redirect.
+  function redirectToOAuth(clientId) {
+    for (const k of CFG_KEYS) {
+      localStorage.setItem(k, document.getElementById(k).value.trim());
+    }
+    localStorage.setItem(PENDING_KEY, "1");
+    const url = buildAuthUrl(clientId);
+    log("Redirecting to Google for consent…", "note");
+    window.location.href = url;
+  }
+
+  // Returns a valid access token, or throws if auth is needed (which we
+  // handle by starting the redirect flow at the caller).
+  function getAccessTokenCached() {
+    const t = getCachedToken();
+    if (!t) throw new Error("NEED_OAUTH");
+    return t;
+  }
+
+  // Handle a possible return from OAuth redirect. Runs synchronously on
+  // script execution so pendingSync can drive auto-resume.
+  let autoResumeAfterOAuth = false;
+  try {
+    const parsed = parseHashToken();
+    if (parsed) {
+      setCachedToken(parsed);
+      clearUrlHash();
+      note("Received OAuth token from Google.");
+      if (localStorage.getItem(PENDING_KEY) === "1") {
+        localStorage.removeItem(PENDING_KEY);
+        autoResumeAfterOAuth = true;
+      }
+    }
+  } catch (e) {
+    // Parsed an error=… hash — surface it but don't crash the page.
+    localStorage.removeItem(PENDING_KEY);
+    clearUrlHash();
+    err(e.message);
   }
 
   // ─── Date helpers ──────────────────────────────────────────────────────
@@ -620,21 +647,9 @@
     if (device.gatt.connected) device.gatt.disconnect();
   }
 
-  // ─── Top-level sync button ─────────────────────────────────────────────
-  document.getElementById("syncBtn").addEventListener("click", async () => {
+  // ─── Main sync flow ────────────────────────────────────────────────────
+  async function runSync() {
     const btn = document.getElementById("syncBtn");
-
-    // If we're in retry mode after a failed GIS load, re-run the loader
-    // instead of trying to sync.
-    if (btn.dataset.mode === "retry") {
-      btn.dataset.mode = "";
-      btn.disabled = true;
-      btn.textContent = "Loading Google services…";
-      clearLog();
-      await initGIS();
-      return;
-    }
-
     btn.disabled = true;
     clearLog();
     try {
@@ -647,6 +662,20 @@
       if (!cfg.clientId)  throw new Error("OAuth Client ID is required");
       if (!cfg.calendarId) throw new Error("Calendar ID is required");
 
+      // Step 1: token. If none cached, trigger the redirect — the rest of
+      // the flow will resume automatically after we land back here.
+      let token;
+      try {
+        token = getAccessTokenCached();
+        ok("Using cached Google token.");
+      } catch (e) {
+        if (e.message === "NEED_OAUTH") {
+          redirectToOAuth(cfg.clientId);
+          return; // navigating away — stop here
+        }
+        throw e;
+      }
+
       if (!navigator.bluetooth) {
         throw new Error("Web Bluetooth not available — use Bluefy on iPhone (Safari doesn't support it).");
       }
@@ -657,12 +686,20 @@
       friEnd.setDate(monday.getDate() + 5); // Saturday 00:00
       note(`Week: ${monday.toDateString()} → ${new Date(friEnd - 1).toDateString()}`);
 
-      log("Requesting Google access token…");
-      const token = await getAccessToken(cfg.clientId);
-      ok("Token acquired");
-
       log("Fetching calendar events…");
-      const events = await fetchCalendarEvents(token, cfg.calendarId, monday, friEnd);
+      let events;
+      try {
+        events = await fetchCalendarEvents(token, cfg.calendarId, monday, friEnd);
+      } catch (e) {
+        // Token might be revoked/expired even within its stated TTL
+        if (/401|403/.test(String(e))) {
+          warn("Token rejected — re-authorizing…");
+          clearCachedToken();
+          redirectToOAuth(cfg.clientId);
+          return;
+        }
+        throw e;
+      }
       ok(`Got ${events.length} event(s)`);
 
       log("Fetching weather…");
@@ -682,7 +719,16 @@
     } finally {
       btn.disabled = false;
     }
-  });
+  }
+
+  document.getElementById("syncBtn").addEventListener("click", runSync);
+
+  // Auto-resume sync if we just came back from the OAuth redirect with a fresh token.
+  if (autoResumeAfterOAuth) {
+    note("Resuming sync after OAuth return…");
+    // Small delay so the initial status render is visible before runSync clears the log
+    setTimeout(runSync, 200);
+  }
   </script>
 </body>
 </html>
