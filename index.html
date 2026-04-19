@@ -564,37 +564,74 @@
     const ctrlChr = await service.getCharacteristic(BLE_CTRL);
     const statChr = await service.getCharacteristic(BLE_STAT);
 
-    // Persistent status channel — register ONE listener up front (before
-    // any writes) so notifications that arrive during the gap between the
-    // write completing and waitForStatus being called aren't lost.
-    const statusBuffer  = [];   // incoming notifications we haven't consumed yet
-    const statusWaiters = [];   // resolvers waiting for the next notification
+    // Defensive decode — in some WebView implementations ev.target.value
+    // can be a DataView, in others the bytes live at .buffer. Try both.
+    function decodeValue(v) {
+      if (!v) return "";
+      try { return new TextDecoder().decode(v); } catch {}
+      try { return new TextDecoder().decode(v.buffer); } catch {}
+      try { return new TextDecoder().decode(new Uint8Array(v.buffer || v)); } catch {}
+      return "[undecodable]";
+    }
+
+    // Persistent buffer+waiter pattern (notifications can arrive between a
+    // write completing and waitForStatus being called — buffer until consumed).
+    const statusBuffer  = [];
+    const statusWaiters = [];
+
+    function pushStatus(source, text) {
+      log(`← ${text}  [${source}]`);
+      if (statusWaiters.length > 0) statusWaiters.shift()(text);
+      else                          statusBuffer.push(text);
+    }
+
+    // Subscribe to CCCD first, then attach listener. Some iOS WebView stacks
+    // only deliver events that arrive AFTER listener registration finishes,
+    // so we give the CCCD a moment to land, then add the handler.
+    await statChr.startNotifications();
+    await new Promise(r => setTimeout(r, 200));
 
     statChr.addEventListener("characteristicvaluechanged", (ev) => {
-      const v = new TextDecoder().decode(ev.target.value);
-      log(`← ${v}`);
-      if (statusWaiters.length > 0) {
-        statusWaiters.shift()(v);
-      } else {
-        statusBuffer.push(v);
-      }
+      pushStatus("notify", decodeValue(ev.target.value));
     });
-    await statChr.startNotifications();
-    // Small settle delay — some iOS WebViews finalize the CCCD write slightly
-    // after startNotifications() resolves, and we don't want the server's
-    // first notify() to race ahead of the subscription.
-    await new Promise(r => setTimeout(r, 150));
+
+    // Fallback poll — if Bluefy drops the notification, readValue() still
+    // lets us see the current status characteristic value. We only poll
+    // while a waiter is waiting; idle periods are free. Poll interval is
+    // 300ms; we dedupe against the last-seen value so repeats don't fire.
+    let lastPolledValue = "";
+    let pollTimer = null;
+    function startPolling() {
+      if (pollTimer) return;
+      pollTimer = setInterval(async () => {
+        if (statusWaiters.length === 0) return;
+        try {
+          const v = await statChr.readValue();
+          const text = decodeValue(v);
+          if (text && text !== lastPolledValue) {
+            lastPolledValue = text;
+            pushStatus("poll", text);
+          }
+        } catch (e) {
+          // transient read failures are OK — next poll will retry
+        }
+      }, 300);
+    }
+    function stopPolling() {
+      if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    }
 
     function waitForStatus(expected, timeoutMs = 10000) {
       return new Promise((resolve, reject) => {
+        startPolling();
         const handle = (v) => {
-          if (v.startsWith("ERR")) return reject(new Error(v));
-          if (v === expected)       return resolve(v);
-          // Some other status line — swallow it and keep waiting.
+          if (v.startsWith("ERR")) { stopPolling(); return reject(new Error(v)); }
+          if (v === expected)       { stopPolling(); return resolve(v); }
           statusWaiters.push(handle);
         };
         if (statusBuffer.length > 0) { handle(statusBuffer.shift()); return; }
         const t = setTimeout(() => {
+          stopPolling();
           const idx = statusWaiters.indexOf(handle);
           if (idx >= 0) statusWaiters.splice(idx, 1);
           reject(new Error(`Timeout waiting for ${expected}`));
