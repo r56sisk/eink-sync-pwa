@@ -482,6 +482,15 @@
         const endStr   = e.end   && (e.end.dateTime   || e.end.date);
         if (!startStr) continue;
         if (!e.start.dateTime) continue; // skip all-day events
+
+        // Skip backup / non-primary-teacher events:
+        //   - title explicitly tagged with "(BACKUP)" (case-insensitive)
+        //   - Google Calendar colorId "5" == "Banana" (yellow), used on this
+        //     calendar for backup-only assignments.
+        const rawSummary = String(e.summary || "");
+        if (/\(\s*backup\s*\)/i.test(rawSummary)) continue;
+        if (e.colorId === "5") continue;
+
         const start = new Date(startStr);
         if (!sameLocalDay(start, d)) continue;
         const key = e.iCalUID || e.id;
@@ -489,7 +498,7 @@
         if (key) seen.add(key);
         const end = endStr ? new Date(endStr) : new Date(start.getTime() + 30 * 60 * 1000);
         dayEvents.push({
-          title: cleanTitle(e.summary),
+          title: cleanTitle(rawSummary),
           time:  formatRange(start, end),
         });
       }
@@ -555,33 +564,50 @@
     const ctrlChr = await service.getCharacteristic(BLE_CTRL);
     const statChr = await service.getCharacteristic(BLE_STAT);
 
-    // Listen for status notifications
-    const statusEvents = [];
-    const statusPromise = (expected) => new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error(`Timeout waiting for ${expected}`)), 15000);
-      const handler = (ev) => {
-        const v = new TextDecoder().decode(ev.target.value);
-        statusEvents.push(v);
-        log(`← ${v}`);
-        if (v.startsWith("ERR")) {
-          clearTimeout(timer);
-          statChr.removeEventListener("characteristicvaluechanged", handler);
-          reject(new Error(v));
-        } else if (v === expected) {
-          clearTimeout(timer);
-          statChr.removeEventListener("characteristicvaluechanged", handler);
-          resolve(v);
-        }
-      };
-      statChr.addEventListener("characteristicvaluechanged", handler);
+    // Persistent status channel — register ONE listener up front (before
+    // any writes) so notifications that arrive during the gap between the
+    // write completing and waitForStatus being called aren't lost.
+    const statusBuffer  = [];   // incoming notifications we haven't consumed yet
+    const statusWaiters = [];   // resolvers waiting for the next notification
+
+    statChr.addEventListener("characteristicvaluechanged", (ev) => {
+      const v = new TextDecoder().decode(ev.target.value);
+      log(`← ${v}`);
+      if (statusWaiters.length > 0) {
+        statusWaiters.shift()(v);
+      } else {
+        statusBuffer.push(v);
+      }
     });
     await statChr.startNotifications();
+    // Small settle delay — some iOS WebViews finalize the CCCD write slightly
+    // after startNotifications() resolves, and we don't want the server's
+    // first notify() to race ahead of the subscription.
+    await new Promise(r => setTimeout(r, 150));
+
+    function waitForStatus(expected, timeoutMs = 10000) {
+      return new Promise((resolve, reject) => {
+        const handle = (v) => {
+          if (v.startsWith("ERR")) return reject(new Error(v));
+          if (v === expected)       return resolve(v);
+          // Some other status line — swallow it and keep waiting.
+          statusWaiters.push(handle);
+        };
+        if (statusBuffer.length > 0) { handle(statusBuffer.shift()); return; }
+        const t = setTimeout(() => {
+          const idx = statusWaiters.indexOf(handle);
+          if (idx >= 0) statusWaiters.splice(idx, 1);
+          reject(new Error(`Timeout waiting for ${expected}`));
+        }, timeoutMs);
+        statusWaiters.push((v) => { clearTimeout(t); handle(v); });
+      });
+    }
 
     // 1) START
     const startCmd = `START:${bytes.length}:${crcHex}`;
     log(`→ ${startCmd}`);
     await ctrlChr.writeValue(new TextEncoder().encode(startCmd));
-    await statusPromise("OK:READY");
+    await waitForStatus("OK:READY");
 
     // 2) Chunks
     const total = Math.ceil(bytes.length / CHUNK_SIZE);
@@ -596,7 +622,7 @@
     // 3) END
     log("→ END");
     await ctrlChr.writeValue(new TextEncoder().encode("END"));
-    await statusPromise("OK:SAVED");
+    await waitForStatus("OK:SAVED", 15000);
 
     if (device.gatt.connected) device.gatt.disconnect();
   }
