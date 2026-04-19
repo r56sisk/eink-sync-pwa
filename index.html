@@ -9,7 +9,8 @@
   result over BLE in 180-byte chunks with CRC32 verification.
 
   ─────────────────────────────────────────────────────────────────────────
-  FIRST-TIME SETUP
+  FIRST-TIME SETUP  (refresh-token flow — no popups, no redirects, works
+                     in Bluefy / WebViews / anything with fetch() + BLE)
   ─────────────────────────────────────────────────────────────────────────
 
   1. GOOGLE CLOUD CONSOLE — enable the Calendar API and make OAuth creds.
@@ -17,52 +18,60 @@
        https://console.cloud.google.com/
 
      a. Create (or reuse) a project.
-     b. APIs & Services → Library → search "Google Calendar API" → Enable.
+     b. APIs & Services → Library → "Google Calendar API" → Enable.
      c. APIs & Services → OAuth consent screen:
           - User type: External
           - App name: "E-Ink Sync" (anything)
           - Scopes: add ".../auth/calendar.readonly"
           - Test users: add r56sisk@gmail.com
           - Publish as Testing (no verification needed).
-     d. APIs & Services → Credentials:
-          - CREATE CREDENTIALS → API key. Copy it (you'll paste below).
-          - CREATE CREDENTIALS → OAuth client ID.
-              Application type: Web application
-              Authorized JavaScript origins: add your hosting ORIGIN. e.g.
-                  https://your-github-username.github.io
-              Authorized redirect URIs: add the EXACT page URL (same one
-                you'll open in Bluefy). e.g.
-                  https://your-github-username.github.io/your-repo/pwa/
-              IMPORTANT: the redirect URI must match character-for-character
-              (trailing slash matters). Google will reject any drift.
-              Save. Copy the Client ID (paste below).
+     d. APIs & Services → Credentials → CREATE CREDENTIALS → OAuth client ID:
+          - Application type: Web application
+          - Authorized redirect URIs: add (exactly):
+              https://developers.google.com/oauthplayground
+          - Save. Copy BOTH the Client ID and the Client Secret
+            (you'll paste into the PWA below).
 
-  2. HOSTING — GitHub Pages is easiest (free, HTTPS, required for GIS+BLE).
+  2. ONE-TIME REFRESH TOKEN via Google OAuth Playground
 
-     a. Create a public GitHub repo, push this `pwa/index.html` to it.
-     b. Repo → Settings → Pages → Source = "Deploy from a branch",
-        Branch = main, Folder = /root (or /pwa if you keep it nested).
-     c. Wait ~1 minute. Your URL will be
-          https://<github-username>.github.io/<repo-name>/
-        (append /pwa/ if the file is inside a pwa folder).
-     d. Go back to step 1d and add THIS exact URL to Authorized JavaScript
-        origins. Google will reject the OAuth call if the origin doesn't
-        match byte-for-byte.
+       https://developers.google.com/oauthplayground
 
-  3. iPHONE — install Bluefy (regular Safari does not support Web Bluetooth).
+     a. Click the ⚙ gear icon (top right).
+     b. Check "Use your own OAuth credentials".
+     c. Paste your Client ID + Client Secret. Close the settings.
+     d. LEFT PANEL — Step 1 "Select & authorize APIs":
+          - Scroll to "Calendar API v3"
+          - Check only:  https://www.googleapis.com/auth/calendar.readonly
+          - Click "Authorize APIs". Sign in to the account that owns the
+            calendar (r56sisk@gmail.com). Click "Allow".
+     e. Back in the playground, Step 2 "Exchange authorization code for
+        tokens" → click "Exchange authorization code for tokens".
+     f. Copy the "Refresh token" value. This is long-lived — you paste it
+        once and never again.
 
-     a. App Store → search "Bluefy - Web BLE Browser" → install.
+  3. HOSTING — GitHub Pages.
+     a. Push this `pwa/` folder to a public repo.
+     b. Repo → Settings → Pages → Deploy from branch = main, folder = /root
+        (or /docs or /pwa if nested).
+     c. Wait ~1 minute, note your URL.
+
+  4. iPHONE — install Bluefy (Safari doesn't do Web Bluetooth).
+     a. App Store → "Bluefy - Web BLE Browser" → install.
      b. Open Bluefy, navigate to your GitHub Pages URL.
-     c. (Optional) Share → Add to Home Screen for a one-tap launch icon.
+     c. (Optional) Share → Add to Home Screen.
 
-  4. FIRST RUN
-
-     a. Paste your API Key and OAuth Client ID into the two fields below
-        (they are saved to localStorage so you only do this once).
+  5. FIRST RUN
+     a. Paste your Client ID, Client Secret, and Refresh Token into the
+        fields below. They persist in localStorage — one-time setup.
      b. Reset the ESP32 so it's inside its 30-second BLE window.
-     c. Tap "Sync Now". Grant Google consent, pick Ricky-EInk-Display from
-        the Bluetooth picker. Watch the log until "Saved to device".
+     c. Tap "Sync Now". No popups, no consent. Log should show
+        "Access token refreshed" → calendar → weather → BLE → Saved.
 
+  SECURITY NOTE: Your refresh token and client secret are stored in this
+  browser's localStorage. That's fine for a personal device. Don't share
+  this hosting URL with screen recordings showing the inputs, and if you
+  ever lose your phone you can revoke the token at
+  https://myaccount.google.com/permissions .
   ─────────────────────────────────────────────────────────────────────────
 -->
 <html lang="en">
@@ -205,24 +214,23 @@
     <details class="setup">
       <summary>First-time setup</summary>
       <ol>
-        <li>In <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a>: enable the Calendar API, then create an API key and an OAuth Client ID of type "Web application".</li>
-        <li>On that OAuth client, add:
-          <br><b>Authorized JavaScript origins:</b> your hosting origin, e.g. <code>https://you.github.io</code>
-          <br><b>Authorized redirect URIs:</b> the exact page URL, e.g. <code>https://you.github.io/repo/pwa/</code>
-          (trailing slash matters).
-        </li>
-        <li>Paste the API key + Client ID below. They persist in your browser — one-time setup.</li>
-        <li>Reset the ESP32 so it's inside its 30s BLE window, then tap Sync Now. Google will redirect you for consent on first run; the token is cached for ~1 hour so subsequent syncs skip the redirect.</li>
+        <li>In <a href="https://console.cloud.google.com/" target="_blank">Google Cloud Console</a>: enable Calendar API, create an OAuth Client ID (type "Web application") with redirect URI <code>https://developers.google.com/oauthplayground</code>. Copy Client ID + Client Secret.</li>
+        <li>Go to <a href="https://developers.google.com/oauthplayground" target="_blank">OAuth Playground</a> → ⚙ gear → "Use your own OAuth credentials" → paste ID + Secret. Step 1: pick <code>calendar.readonly</code> → Authorize APIs → sign in → Allow. Step 2: Exchange authorization code for tokens. Copy the <b>Refresh token</b>.</li>
+        <li>Paste Client ID, Client Secret, Refresh Token below. They persist in localStorage — one-time setup.</li>
+        <li>Reset the ESP32 so it's inside its 30s BLE window, then tap Sync Now. No popups. Access tokens are auto-refreshed and cached for ~55 minutes.</li>
       </ol>
-      <p class="muted">If Google says "redirect_uri_mismatch", the URL in your browser's address bar must match a value in Authorized redirect URIs exactly (protocol, host, path, and any trailing slash).</p>
+      <p class="muted">See the comment at the top of this file's source for step-by-step details. The refresh token is long-lived — you enter it once. Revoke any time at <a href="https://myaccount.google.com/permissions" target="_blank">myaccount.google.com/permissions</a>.</p>
     </details>
 
     <div class="config">
-      <label for="apiKey">Google API Key</label>
-      <input id="apiKey" type="text" autocomplete="off" spellcheck="false" placeholder="AIza...">
-
       <label for="clientId">OAuth Client ID</label>
-      <input id="clientId" type="text" autocomplete="off" spellcheck="false" placeholder="123...apps.googleusercontent.com">
+      <input id="clientId" type="text" autocomplete="off" spellcheck="false" placeholder="123…apps.googleusercontent.com">
+
+      <label for="clientSecret">Client Secret</label>
+      <input id="clientSecret" type="password" autocomplete="off" spellcheck="false" placeholder="GOCSPX-…">
+
+      <label for="refreshToken">Refresh Token</label>
+      <input id="refreshToken" type="password" autocomplete="off" spellcheck="false" placeholder="1//0g…">
 
       <label for="calendarId">Calendar ID</label>
       <input id="calendarId" type="text" autocomplete="off" spellcheck="false" value="r56sisk@gmail.com">
@@ -237,7 +245,7 @@
   "use strict";
 
   // ─── Config persisted in localStorage ──────────────────────────────────
-  const CFG_KEYS = ["apiKey", "clientId", "calendarId"];
+  const CFG_KEYS = ["clientId", "clientSecret", "refreshToken", "calendarId"];
   for (const k of CFG_KEYS) {
     const saved = localStorage.getItem(k);
     if (saved) document.getElementById(k).value = saved;
@@ -272,63 +280,20 @@
   const note = m => log(m, "note");
   function clearLog() { statusEl.textContent = ""; previewEl.textContent = ""; }
 
-  // ─── OAuth 2.0 implicit flow (redirect, no JS library) ─────────────────
-  // Bluefy (and many WKWebView-based iOS browsers) block Google Identity
-  // Services. We use the pure-HTTPS redirect-based implicit flow instead —
-  // no external JS, works everywhere.
-  //
-  //   1. Tap Sync Now  → we mark pendingSync=1 and redirect to Google's auth URL
-  //   2. User consents → Google redirects back to this page with
-  //                      #access_token=…&expires_in=3600… in the URL fragment
-  //   3. On page load we parse the fragment, stash the token, and if
-  //      pendingSync was set, auto-resume the sync.
-  //   4. Tokens last ~1 hour; we cache them in localStorage and skip the
-  //      redirect as long as the cached one is still valid.
-  const OAUTH_SCOPE    = "https://www.googleapis.com/auth/calendar.readonly";
-  const TOKEN_KEY      = "gCalToken";     // { access_token, expires_at }
-  const PENDING_KEY    = "pendingSync";   // "1" if a sync is in progress across the redirect
+  // ─── OAuth 2.0 refresh-token flow (no redirects, works in WebViews) ────
+  // The user generates a long-lived refresh token ONCE via OAuth Playground
+  // (see setup instructions above). We exchange it for a ~1-hour access
+  // token on each sync with a single POST to Google's token endpoint.
+  // That endpoint supports CORS, so this works from any HTTPS-hosted page.
+  const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
+  const TOKEN_KEY      = "gCalAccessToken";  // cached { access_token, expires_at }
 
-  function getRedirectUri() {
-    // MUST match a value under "Authorized redirect URIs" in your OAuth client.
-    // Strips hash + query so copy-paste is deterministic.
-    return window.location.origin + window.location.pathname;
-  }
-
-  function buildAuthUrl(clientId) {
-    const params = new URLSearchParams({
-      client_id:     clientId,
-      redirect_uri:  getRedirectUri(),
-      response_type: "token",
-      scope:         OAUTH_SCOPE,
-      include_granted_scopes: "true",
-      prompt:        "consent", // first time → consent; cached grants re-consent silently
-      state:         "sync",
-    });
-    return `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
-  }
-
-  function parseHashToken() {
-    if (!window.location.hash || window.location.hash.length < 2) return null;
-    const params = new URLSearchParams(window.location.hash.slice(1));
-    const access_token = params.get("access_token");
-    if (!access_token) {
-      const error = params.get("error");
-      if (error) throw new Error(`OAuth error: ${error}`);
-      return null;
-    }
-    const expires_in = parseInt(params.get("expires_in") || "3600", 10);
-    return {
-      access_token,
-      expires_at: Date.now() + expires_in * 1000,
-    };
-  }
-
-  function getCachedToken() {
+  function getCachedAccessToken() {
     const raw = localStorage.getItem(TOKEN_KEY);
     if (!raw) return null;
     try {
       const t = JSON.parse(raw);
-      // 60s safety margin so the fetch doesn't race the expiry.
+      // 60s safety margin so a long fetch doesn't race the expiry.
       if (t.access_token && t.expires_at && Date.now() < t.expires_at - 60000) {
         return t.access_token;
       }
@@ -337,57 +302,46 @@
     return null;
   }
 
-  function setCachedToken(t) {
-    localStorage.setItem(TOKEN_KEY, JSON.stringify(t));
+  function cacheAccessToken(accessToken, expiresInSec) {
+    localStorage.setItem(TOKEN_KEY, JSON.stringify({
+      access_token: accessToken,
+      expires_at:   Date.now() + expiresInSec * 1000,
+    }));
   }
 
-  function clearCachedToken() {
-    localStorage.removeItem(TOKEN_KEY);
-  }
-
-  function clearUrlHash() {
-    history.replaceState(null, "", window.location.pathname + window.location.search);
-  }
-
-  // Redirects to Google's auth URL. Stashes pendingSync so we know to resume
-  // on return. Saves config fields first so they're populated after redirect.
-  function redirectToOAuth(clientId) {
-    for (const k of CFG_KEYS) {
-      localStorage.setItem(k, document.getElementById(k).value.trim());
+  async function refreshAccessToken(clientId, clientSecret, refreshToken) {
+    const body = new URLSearchParams({
+      client_id:     clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type:    "refresh_token",
+    });
+    const r = await fetch(TOKEN_ENDPOINT, {
+      method:  "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
+    if (!r.ok) {
+      const text = await r.text();
+      throw new Error(`Token refresh failed (${r.status}): ${text}`);
     }
-    localStorage.setItem(PENDING_KEY, "1");
-    const url = buildAuthUrl(clientId);
-    log("Redirecting to Google for consent…", "note");
-    window.location.href = url;
+    const data = await r.json();
+    if (!data.access_token) throw new Error("Token endpoint returned no access_token");
+    cacheAccessToken(data.access_token, parseInt(data.expires_in || "3600", 10));
+    return data.access_token;
   }
 
-  // Returns a valid access token, or throws if auth is needed (which we
-  // handle by starting the redirect flow at the caller).
-  function getAccessTokenCached() {
-    const t = getCachedToken();
-    if (!t) throw new Error("NEED_OAUTH");
+  // Returns a fresh or cached access token. Auto-refreshes if needed.
+  async function getAccessToken(cfg) {
+    const cached = getCachedAccessToken();
+    if (cached) {
+      ok("Using cached access token.");
+      return cached;
+    }
+    log("Refreshing Google access token…");
+    const t = await refreshAccessToken(cfg.clientId, cfg.clientSecret, cfg.refreshToken);
+    ok("Access token refreshed.");
     return t;
-  }
-
-  // Handle a possible return from OAuth redirect. Runs synchronously on
-  // script execution so pendingSync can drive auto-resume.
-  let autoResumeAfterOAuth = false;
-  try {
-    const parsed = parseHashToken();
-    if (parsed) {
-      setCachedToken(parsed);
-      clearUrlHash();
-      note("Received OAuth token from Google.");
-      if (localStorage.getItem(PENDING_KEY) === "1") {
-        localStorage.removeItem(PENDING_KEY);
-        autoResumeAfterOAuth = true;
-      }
-    }
-  } catch (e) {
-    // Parsed an error=… hash — surface it but don't crash the page.
-    localStorage.removeItem(PENDING_KEY);
-    clearUrlHash();
-    err(e.message);
   }
 
   // ─── Date helpers ──────────────────────────────────────────────────────
@@ -658,27 +612,16 @@
         cfg[k] = document.getElementById(k).value.trim();
         localStorage.setItem(k, cfg[k]);
       }
-      if (!cfg.apiKey)    throw new Error("Google API Key is required");
-      if (!cfg.clientId)  throw new Error("OAuth Client ID is required");
-      if (!cfg.calendarId) throw new Error("Calendar ID is required");
-
-      // Step 1: token. If none cached, trigger the redirect — the rest of
-      // the flow will resume automatically after we land back here.
-      let token;
-      try {
-        token = getAccessTokenCached();
-        ok("Using cached Google token.");
-      } catch (e) {
-        if (e.message === "NEED_OAUTH") {
-          redirectToOAuth(cfg.clientId);
-          return; // navigating away — stop here
-        }
-        throw e;
-      }
+      if (!cfg.clientId)     throw new Error("OAuth Client ID is required");
+      if (!cfg.clientSecret) throw new Error("Client Secret is required");
+      if (!cfg.refreshToken) throw new Error("Refresh Token is required");
+      if (!cfg.calendarId)   throw new Error("Calendar ID is required");
 
       if (!navigator.bluetooth) {
         throw new Error("Web Bluetooth not available — use Bluefy on iPhone (Safari doesn't support it).");
       }
+
+      let token = await getAccessToken(cfg);
 
       // Time window: this week's Mon 00:00 → Fri 23:59:59 local
       const monday = getMondayOfWeek(new Date());
@@ -691,14 +634,15 @@
       try {
         events = await fetchCalendarEvents(token, cfg.calendarId, monday, friEnd);
       } catch (e) {
-        // Token might be revoked/expired even within its stated TTL
+        // Cached token may have been revoked — try one forced refresh.
         if (/401|403/.test(String(e))) {
-          warn("Token rejected — re-authorizing…");
-          clearCachedToken();
-          redirectToOAuth(cfg.clientId);
-          return;
+          warn("Token rejected — forcing refresh…");
+          localStorage.removeItem(TOKEN_KEY);
+          token  = await getAccessToken(cfg);
+          events = await fetchCalendarEvents(token, cfg.calendarId, monday, friEnd);
+        } else {
+          throw e;
         }
-        throw e;
       }
       ok(`Got ${events.length} event(s)`);
 
@@ -722,13 +666,6 @@
   }
 
   document.getElementById("syncBtn").addEventListener("click", runSync);
-
-  // Auto-resume sync if we just came back from the OAuth redirect with a fresh token.
-  if (autoResumeAfterOAuth) {
-    note("Resuming sync after OAuth return…");
-    // Small delay so the initial status render is visible before runSync clears the log
-    setTimeout(runSync, 200);
-  }
   </script>
 </body>
 </html>
