@@ -380,14 +380,33 @@
   }
 
   // ─── Event title cleanup ───────────────────────────────────────────────
+  //   Nuclear PHA strip: remove the "PHA" token anywhere it appears in the
+  //   title, plus every non-letter character immediately after it (dashes,
+  //   colons, whitespace, NBSP, zero-width chars, ...). Handles all
+  //   separator variants including ones we can't see in the preview.
+  //
+  //   Also logs every raw title + hex bytes to the on-screen status log
+  //   so we can see exactly what the calendar is handing us.
   function cleanTitle(raw) {
     let t = String(raw || "");
-    t = t.replace(/\s*\([^)]*\)/g, "");      // anything in parens
-    t = t.replace(/\b[A-Z]\d{2,}[A-Z]?\b/g, ""); // location codes like E300N, B115
-    t = t.replace(/\bRoom\s*#?\s*\d+\b/gi, "");  // "Room 405" / "Room #405"
-    t = t.replace(/\b\d+v\d+\b/g, "");        // "2v2" style ratios
-    t = t.replace(/\b\d+\s*:\s*\d+\b/g, "");  // "1:1" style ratios
+    const origCodes = [...t].slice(0, 30).map(c => c.charCodeAt(0).toString(16).padStart(2, "0")).join(" ");
+    const hasPHA = /PHA/i.test(t);
+    if (hasPHA) {
+      log(`    RAW: "${t}"`);
+      log(`    hex: ${origCodes}`);
+    }
+
+    // Strip "PHA" (as a standalone word) plus any run of non-letter chars
+    // after it. Matches regardless of position — beginning, middle, or end.
+    const before = t;
+    t = t.replace(/\bPHA\b[^A-Za-z0-9]*/gi, "");
+
+    t = t.replace(/\s*\(\s*primary\s*\)/gi, "");
+    t = t.replace(/\s*\(\s*backup\s*\)/gi, "");
+    t = t.replace(/\bE300N\b/gi, "");
     t = t.replace(/\s{2,}/g, " ").trim();
+
+    if (hasPHA && t !== before) log(`    CLEANED: "${t}"`);
     return t || "(untitled)";
   }
 
