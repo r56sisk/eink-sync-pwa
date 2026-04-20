@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+OCTYPE html>
 <!--
   E-Ink Display Sync — Progressive Web App
   ==========================================
@@ -81,6 +81,10 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-title" content="E-Ink Sync">
   <meta name="theme-color" content="#1a1a1a">
+  <!-- Disable caching so Bluefy/WKWebView picks up new deploys. -->
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+  <meta http-equiv="Pragma" content="no-cache">
+  <meta http-equiv="Expires" content="0">
   <title>E-Ink Sync</title>
 
   <style>
@@ -238,7 +242,8 @@
 
     <button id="syncBtn" class="primary">Sync Now</button>
 
-    <div id="status" class="log">Ready.</div>
+    <div id="status" class="log">PWA build: 2026-04-19T20:38 — nuclear PHA strip + verbose logs
+Ready.</div>
     <pre id="preview" class="preview"></pre>
   </div>
   <script>
@@ -390,15 +395,11 @@
   function cleanTitle(raw) {
     let t = String(raw || "");
     const origCodes = [...t].slice(0, 30).map(c => c.charCodeAt(0).toString(16).padStart(2, "0")).join(" ");
-    const hasPHA = /PHA/i.test(t);
-    if (hasPHA) {
-      log(`    RAW: "${t}"`);
-      log(`    hex: ${origCodes}`);
-    }
+    log(`[CT] raw="${t}"`);
+    log(`[CT] hex=${origCodes}`);
 
     // Strip "PHA" (as a standalone word) plus any run of non-letter chars
     // after it. Matches regardless of position — beginning, middle, or end.
-    const before = t;
     t = t.replace(/\bPHA\b[^A-Za-z0-9]*/gi, "");
 
     t = t.replace(/\s*\(\s*primary\s*\)/gi, "");
@@ -406,7 +407,7 @@
     t = t.replace(/\bE300N\b/gi, "");
     t = t.replace(/\s{2,}/g, " ").trim();
 
-    if (hasPHA && t !== before) log(`    CLEANED: "${t}"`);
+    log(`[CT] out="${t}"`);
     return t || "(untitled)";
   }
 
