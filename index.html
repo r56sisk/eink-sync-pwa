@@ -1,4 +1,4 @@
-OCTYPE html>
+<!DOCTYPE html>
 <!--
   E-Ink Display Sync — Progressive Web App
   ==========================================
@@ -242,7 +242,7 @@ OCTYPE html>
 
     <button id="syncBtn" class="primary">Sync Now</button>
 
-    <div id="status" class="log">PWA build: 2026-04-19T20:38 — nuclear PHA strip + verbose logs
+    <div id="status" class="log">PWA build: 2026-04-19T21:00 — work-hours weather + chronological sort
 Ready.</div>
     <pre id="preview" class="preview"></pre>
   </div>
@@ -460,26 +460,76 @@ Ready.</div>
     return body.items || [];
   }
 
+  // Hourly forecast aggregated to the user's work window (08:00–16:30 local).
+  // Reasoning: a daily summary that says "Drizzle" because it sprinkled at
+  // 4 AM is misleading when the actual work day was clear. By only looking
+  // at 08–16 hourly samples we get weather that reflects what the user
+  // will actually experience commuting to/at/from the office.
+  //
+  // Aggregation:
+  //   - high / low  = max/min temp across work hours (not full-day extremes)
+  //   - precip      = max chance-of-precip across work hours
+  //   - wmo code    = if any work hour has a precip code (>=51), pick the
+  //                   highest-numbered one (heavier WMO codes ≈ heavier
+  //                   weather within each category). Otherwise pick the
+  //                   most common non-precip code (clear/cloudy/etc).
   async function fetchWeather() {
     const url = new URL("https://api.open-meteo.com/v1/forecast");
     url.searchParams.set("latitude", LAT);
     url.searchParams.set("longitude", LON);
-    url.searchParams.set("daily", "weathercode,temperature_2m_max,temperature_2m_min,precipitation_probability_max");
+    url.searchParams.set("hourly", "weathercode,temperature_2m,precipitation_probability");
     url.searchParams.set("temperature_unit", "fahrenheit");
     url.searchParams.set("timezone", "America/New_York");
     url.searchParams.set("forecast_days", "8");
     const r = await fetch(url);
     if (!r.ok) throw new Error(`Open-Meteo ${r.status}`);
     const body = await r.json();
-    const daily = body.daily || {};
+    const h = body.hourly || {};
+    const times = h.time || [];
+
+    // Bucket work-hour samples by date.
+    const byDate = new Map();
+    for (let i = 0; i < times.length; i++) {
+      const t = times[i];                       // "2026-04-20T08:00"
+      const date = t.substring(0, 10);
+      const hour = parseInt(t.substring(11, 13), 10);
+      // 08:00 through 16:59 covers 0800–1659; closest fit to the
+      // 0800–1630 spec without per-half-hour granularity from the API.
+      if (hour < 8 || hour > 16) continue;
+      const sample = {
+        wmo:    h.weathercode[i],
+        temp:   h.temperature_2m[i],
+        precip: h.precipitation_probability[i] || 0,
+      };
+      if (!byDate.has(date)) byDate.set(date, []);
+      byDate.get(date).push(sample);
+    }
+
     const out = new Map();
-    const dates  = daily.time || [];
-    for (let i = 0; i < dates.length; i++) {
-      out.set(dates[i], {
-        high:    Math.round(daily.temperature_2m_max[i]),
-        low:     Math.round(daily.temperature_2m_min[i]),
-        precip:  Math.round(daily.precipitation_probability_max[i] || 0),
-        wmo:     daily.weathercode[i],
+    for (const [date, samples] of byDate.entries()) {
+      if (!samples.length) continue;
+      const temps   = samples.map(s => s.temp);
+      const precips = samples.map(s => s.precip);
+      const codes   = samples.map(s => s.wmo);
+
+      const precipCodes = codes.filter(c => c >= 51);
+      let domCode;
+      if (precipCodes.length > 0) {
+        domCode = Math.max(...precipCodes);
+      } else {
+        const counts = new Map();
+        for (const c of codes) counts.set(c, (counts.get(c) || 0) + 1);
+        let best = -1;
+        for (const [c, n] of counts.entries()) {
+          if (n > best) { best = n; domCode = c; }
+        }
+      }
+
+      out.set(date, {
+        high:   Math.round(Math.max(...temps)),
+        low:    Math.round(Math.min(...temps)),
+        precip: Math.round(Math.max(...precips)),
+        wmo:    domCode,
       });
     }
     return out;
@@ -495,8 +545,10 @@ Ready.</div>
       const d = new Date(monday);
       d.setDate(monday.getDate() + i);
 
-      // Events on this local day
-      const dayEvents = [];
+      // Events on this local day. Build with the start Date kept so we
+      // can sort chronologically (the formatted "time" string sorts wrong
+      // across the noon AM/PM boundary).
+      const dayItems = [];
       for (const e of events) {
         const startStr = e.start && (e.start.dateTime || e.start.date);
         const endStr   = e.end   && (e.end.dateTime   || e.end.date);
@@ -517,12 +569,15 @@ Ready.</div>
         if (key && seen.has(key)) continue;
         if (key) seen.add(key);
         const end = endStr ? new Date(endStr) : new Date(start.getTime() + 30 * 60 * 1000);
-        dayEvents.push({
+        dayItems.push({
+          start,
           title: cleanTitle(rawSummary),
           time:  formatRange(start, end),
         });
       }
-      dayEvents.sort((a, b) => a.time.localeCompare(b.time));
+      // Sort earliest → latest by actual Date, then drop the helper field.
+      dayItems.sort((a, b) => a.start - b.start);
+      const dayEvents = dayItems.map(({ start, ...rest }) => rest);
 
       // Weather for this day
       const key = isoDay(d);
