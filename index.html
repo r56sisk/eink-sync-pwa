@@ -242,7 +242,7 @@
 
     <button id="syncBtn" class="primary">Sync Now</button>
 
-    <div id="status" class="log">PWA build: 2026-04-19T21:00 — work-hours weather + chronological sort
+    <div id="status" class="log">PWA build: 2026-04-19T21:20 — hybrid weather + sort verification logs
 Ready.</div>
     <pre id="preview" class="preview"></pre>
   </div>
@@ -460,19 +460,17 @@ Ready.</div>
     return body.items || [];
   }
 
-  // Hourly forecast aggregated to the user's work window (08:00–16:30 local).
-  // Reasoning: a daily summary that says "Drizzle" because it sprinkled at
-  // 4 AM is misleading when the actual work day was clear. By only looking
-  // at 08–16 hourly samples we get weather that reflects what the user
-  // will actually experience commuting to/at/from the office.
+  // Hybrid hourly forecast:
+  //   - high / low  = max/min temp across the FULL day (24 hourly samples)
+  //                   so the displayed range matches the real daily spread
+  //                   (overnight lows, late-afternoon highs).
+  //   - condition   = WMO code from WORK HOURS only (08:00–16:59 local) so
+  //                   a 4 AM downpour that's gone by 8 AM doesn't flip the
+  //                   icon to "Rain" when work hours were sunny.
+  //   - precip%     = max chance-of-precip across WORK HOURS only.
   //
-  // Aggregation:
-  //   - high / low  = max/min temp across work hours (not full-day extremes)
-  //   - precip      = max chance-of-precip across work hours
-  //   - wmo code    = if any work hour has a precip code (>=51), pick the
-  //                   highest-numbered one (heavier WMO codes ≈ heavier
-  //                   weather within each category). Otherwise pick the
-  //                   most common non-precip code (clear/cloudy/etc).
+  // Single API call — 24-hour data is bucketed into both `allByDate`
+  // (everything, for temps) and `workByDate` (8–16, for condition/precip).
   async function fetchWeather() {
     const url = new URL("https://api.open-meteo.com/v1/forecast");
     url.searchParams.set("latitude", LAT);
@@ -487,31 +485,39 @@ Ready.</div>
     const h = body.hourly || {};
     const times = h.time || [];
 
-    // Bucket work-hour samples by date.
-    const byDate = new Map();
+    const allByDate  = new Map(); // every hour → drives high/low temps
+    const workByDate = new Map(); // 8–16 only → drives condition + precip
     for (let i = 0; i < times.length; i++) {
-      const t = times[i];                       // "2026-04-20T08:00"
+      const t = times[i];                           // "2026-04-20T08:00"
       const date = t.substring(0, 10);
       const hour = parseInt(t.substring(11, 13), 10);
-      // 08:00 through 16:59 covers 0800–1659; closest fit to the
-      // 0800–1630 spec without per-half-hour granularity from the API.
-      if (hour < 8 || hour > 16) continue;
       const sample = {
         wmo:    h.weathercode[i],
         temp:   h.temperature_2m[i],
         precip: h.precipitation_probability[i] || 0,
       };
-      if (!byDate.has(date)) byDate.set(date, []);
-      byDate.get(date).push(sample);
+      if (!allByDate.has(date))  allByDate.set(date, []);
+      allByDate.get(date).push(sample);
+      if (hour >= 8 && hour <= 16) {
+        if (!workByDate.has(date)) workByDate.set(date, []);
+        workByDate.get(date).push(sample);
+      }
     }
 
     const out = new Map();
-    for (const [date, samples] of byDate.entries()) {
-      if (!samples.length) continue;
-      const temps   = samples.map(s => s.temp);
-      const precips = samples.map(s => s.precip);
-      const codes   = samples.map(s => s.wmo);
+    for (const [date, allSamples] of allByDate.entries()) {
+      if (!allSamples.length) continue;
+      // Fall back to all-day samples if a day has zero work-hour data
+      // (shouldn't happen, but safe default).
+      const workSamples = workByDate.get(date) || allSamples;
 
+      // High/Low: full-day temp extremes.
+      const allTemps = allSamples.map(s => s.temp);
+      const high = Math.round(Math.max(...allTemps));
+      const low  = Math.round(Math.min(...allTemps));
+
+      // Condition: heaviest precip during work hours, else most common non-precip code.
+      const codes = workSamples.map(s => s.wmo);
       const precipCodes = codes.filter(c => c >= 51);
       let domCode;
       if (precipCodes.length > 0) {
@@ -525,12 +531,11 @@ Ready.</div>
         }
       }
 
-      out.set(date, {
-        high:   Math.round(Math.max(...temps)),
-        low:    Math.round(Math.min(...temps)),
-        precip: Math.round(Math.max(...precips)),
-        wmo:    domCode,
-      });
+      // Precip% during work hours.
+      const workPrecips = workSamples.map(s => s.precip);
+      const precip = Math.round(Math.max(...workPrecips));
+
+      out.set(date, { high, low, precip, wmo: domCode });
     }
     return out;
   }
@@ -577,6 +582,16 @@ Ready.</div>
       }
       // Sort earliest → latest by actual Date, then drop the helper field.
       dayItems.sort((a, b) => a.start - b.start);
+      // Diagnostic: log the sorted order so we can verify chronology before
+      // the events are bundled into JSON and shipped over BLE.
+      if (dayItems.length > 0) {
+        const summary = dayItems.map(it => {
+          const hh = String(it.start.getHours()).padStart(2, "0");
+          const mm = String(it.start.getMinutes()).padStart(2, "0");
+          return `${hh}:${mm} "${it.title}"`;
+        }).join(" | ");
+        log(`[SORT] d=${i} (${dayNames[i]}) ${dayItems.length} events: ${summary}`);
+      }
       const dayEvents = dayItems.map(({ start, ...rest }) => rest);
 
       // Weather for this day
