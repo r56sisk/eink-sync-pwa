@@ -214,6 +214,7 @@
 <body>
   <div class="wrap">
     <h1>E-Ink Display Sync</h1>
+    <p class="muted" style="margin-top:-12px;margin-bottom:14px;font-size:11px">PWA build: 2026-04-25T12:42 — sort + weather diagnostic logs</p>
 
     <details class="setup">
       <summary>First-time setup</summary>
@@ -242,8 +243,7 @@
 
     <button id="syncBtn" class="primary">Sync Now</button>
 
-    <div id="status" class="log">PWA build: 2026-04-19T21:20 — hybrid weather + sort verification logs
-Ready.</div>
+    <div id="status" class="log">Ready.</div>
     <pre id="preview" class="preview"></pre>
   </div>
   <script>
@@ -537,6 +537,11 @@ Ready.</div>
 
       out.set(date, { high, low, precip, wmo: domCode });
     }
+    // Diagnostic: list every weather key + summary so we can see what
+    // dates fetchWeather produced.
+    const wxKeys = [...out.entries()].map(([k, v]) =>
+      `${k}=${v.high}/${v.low}F wmo${v.wmo}`).join(" | ");
+    log(`[WX] fetched ${out.size} days: ${wxKeys}`);
     return out;
   }
 
@@ -580,24 +585,30 @@ Ready.</div>
           time:  formatRange(start, end),
         });
       }
-      // Sort earliest → latest by actual Date, then drop the helper field.
-      dayItems.sort((a, b) => a.start - b.start);
-      // Diagnostic: log the sorted order so we can verify chronology before
-      // the events are bundled into JSON and shipped over BLE.
-      if (dayItems.length > 0) {
-        const summary = dayItems.map(it => {
-          const hh = String(it.start.getHours()).padStart(2, "0");
-          const mm = String(it.start.getMinutes()).padStart(2, "0");
-          return `${hh}:${mm} "${it.title}"`;
-        }).join(" | ");
-        log(`[SORT] d=${i} (${dayNames[i]}) ${dayItems.length} events: ${summary}`);
-      }
+      // Sort earliest → latest by actual Date.
+      // Coerce to numeric epoch ms explicitly to defeat any oddity where
+      // a.start might not auto-coerce in subtraction.
+      dayItems.sort((a, b) => a.start.getTime() - b.start.getTime());
+
+      // Diagnostic: ALWAYS log per day (even empty) so its absence in the
+      // status area unambiguously means this code didn't run (cache issue).
+      const summary = dayItems.length === 0
+        ? "(none)"
+        : dayItems.map(it => {
+            const hh = String(it.start.getHours()).padStart(2, "0");
+            const mm = String(it.start.getMinutes()).padStart(2, "0");
+            return `${hh}:${mm} "${it.title}"`;
+          }).join(" | ");
+      log(`[SORT] d=${i} (${dayNames[i]}) n=${dayItems.length}: ${summary}`);
+
       const dayEvents = dayItems.map(({ start, ...rest }) => rest);
 
       // Weather for this day
       const key = isoDay(d);
-      const w   = weatherByDate.get(key) || { high: 0, low: 0, precip: 0, wmo: 3 };
+      const wRaw = weatherByDate.get(key);
+      const w   = wRaw || { high: 0, low: 0, precip: 0, wmo: 3 };
       const wm  = wmoToWeather(w.wmo);
+      log(`[WX] d=${i} key="${key}" ${wRaw ? "FOUND" : "MISSING"} → ${w.high}/${w.low}F wmo${w.wmo}`);
 
       days.push({
         name: dayNames[i],
@@ -822,3 +833,4 @@ Ready.</div>
   </script>
 </body>
 </html>
+
